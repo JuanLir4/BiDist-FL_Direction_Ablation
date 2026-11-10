@@ -58,7 +58,7 @@ def distill_student(student, ref_dataset, teacher_q, device, epochs):
 
 def aggregate(states, weights):
     return {
-        key: sum(weight * state[key] for state, weight in zip(weights, states))
+        key: sum(weight * state[key] for state, weight in zip(states, weights))
         for key in states[0]
     }
 
