@@ -6,7 +6,7 @@ import torch.nn.functional as F
 
 from config import BATCH_SIZE, LR, TEMPERATURE, PHASE_MIN_DELTA, PHASE_PATIENCE
 from data import make_loader
-from model import Net
+from model import build_model
 
 
 def train_local(model, dataset, device, epochs, early_stop=True):
@@ -112,11 +112,11 @@ def ensemble_accuracy(models, weights, test_loader, device):
 
 
 def run_mode(mode, phase_states, global_state, private_sets, ref_dataset, test_loader,
-             input_shape, weights, seed, device, alpha, rounds, distill_epochs):
-    clients = [Net(input_shape).to(device) for _ in private_sets]
+             dataset_name, input_shape, weights, seed, device, alpha, rounds, distill_epochs):
+    clients = [build_model(dataset_name, input_shape).to(device) for _ in private_sets]
     for client, state in zip(clients, phase_states):
         client.load_state_dict(copy.deepcopy(state))
-    global_model = Net(input_shape).to(device)
+    global_model = build_model(dataset_name, input_shape).to(device)
     global_model.load_state_dict(copy.deepcopy(global_state))
     rows = []
     server_acc = ensemble_accuracy(clients, weights, test_loader, device)
@@ -126,7 +126,7 @@ def run_mode(mode, phase_states, global_state, private_sets, ref_dataset, test_l
     for round_number in range(1, rounds + 1):
         teacher_outputs = [soft_labels(client, ref_dataset, device) for client in clients]
         if mode in ("c2s_only", "bidirectional"):
-            student = Net(input_shape).to(device)
+            student = build_model(dataset_name, input_shape).to(device)
             student_states = []
             for teacher_q in teacher_outputs:
                 student.load_state_dict(copy.deepcopy(global_model.state_dict()))
@@ -137,12 +137,8 @@ def run_mode(mode, phase_states, global_state, private_sets, ref_dataset, test_l
         else:
             server_acc = ensemble_accuracy(clients, weights, test_loader, device)
 
-        if mode in ("s2c_only", "bidirectional"):
-            global_q = (
-                soft_labels(global_model, ref_dataset, device)
-                if mode == "bidirectional"
-                else sum(weight * q for weight, q in zip(weights, teacher_outputs))
-            )
+        if mode == "bidirectional":
+            global_q = soft_labels(global_model, ref_dataset, device)
             for client, private_set in zip(clients, private_sets):
                 reverse_distill(client, private_set, ref_dataset, global_q, alpha, device, distill_epochs)
 

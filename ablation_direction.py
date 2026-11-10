@@ -8,7 +8,7 @@ import torch
 
 from config import DATASET_INFO, DISTILL_EPOCHS, PHASE_MAX_EPOCHS, ROUNDS, SEEDS, THRESHOLDS
 from data import get_data, make_loader, seed_everything
-from model import Net
+from model import build_model
 from training import evaluate, run_mode, train_local
 
 
@@ -21,7 +21,10 @@ def summarize(per_round_path, out_dir):
         best = group.loc[group["server_acc"].idxmax()]
         reached = group[group["server_acc"] >= THRESHOLDS[dataset]]
         best_rows.append({
-            "dataset": dataset, "model": "net", "mode": mode, "seed": seed,
+            "dataset": dataset,
+            "model": "convnidd" if dataset == "cifar10" else "net",
+            "mode": mode,
+            "seed": seed,
             "best_server_acc": best["server_acc"], "best_round": int(best["round"]),
             "client_mean_acc_at_best_round": best["client_mean_acc"],
             "rounds_to_threshold": reached["round"].min() if len(reached) else np.nan,
@@ -55,6 +58,8 @@ def main():
     parser.add_argument("--alpha", type=float, default=0.3)
     parser.add_argument("--rounds", type=int, default=ROUNDS)
     parser.add_argument("--out", default="results")
+    parser.add_argument("--data-root", default="./data")
+    parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--quick", action="store_true")
     args = parser.parse_args()
     rounds, distill_epochs, phase_max = args.rounds, DISTILL_EPOCHS, PHASE_MAX_EPOCHS
@@ -65,37 +70,52 @@ def main():
     per_round_path = os.path.join(args.out, "results_per_round.csv")
     if os.path.exists(per_round_path):
         os.remove(per_round_path)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if args.device == "cuda" and not torch.cuda.is_available():
+        parser.error("--device cuda was requested, but CUDA is not available")
+    device = torch.device(
+        "cuda" if args.device == "cuda" or (
+            args.device == "auto" and torch.cuda.is_available()
+        ) else "cpu"
+    )
     header = ["dataset", "model", "mode", "seed", "round", "server_acc",
               "client_mean_acc", "client_std_acc"]
 
     for dataset_name in args.datasets:
         for seed in seeds:
             seed_everything(seed)
-            _, test, ref_dataset, private_sets, input_shape = get_data(dataset_name, seed)
+            _, test, ref_dataset, private_sets, input_shape = get_data(
+                dataset_name, seed, root=args.data_root
+            )
             print(dataset_name, seed, "private sizes:", [len(s) for s in private_sets])
             targets = np.asarray(getattr(private_sets[0].dataset, "targets"))
             for i, private_set in enumerate(private_sets):
                 hist = np.bincount(targets[private_set.indices], minlength=10).tolist()
                 print(" client", i, "histogram:", hist)
             test_loader = make_loader(test, False)
-            phase_clients = [Net(input_shape).to(device) for _ in private_sets]
+            phase_clients = [
+                build_model(dataset_name, input_shape).to(device) for _ in private_sets
+            ]
             phase_states = []
             for client, private_set in zip(phase_clients, private_sets):
                 train_local(client, private_set, device, phase_max, early_stop=True)
                 phase_states.append(copy.deepcopy(client.state_dict()))
             phase_acc = [evaluate(client, test_loader, device) for client in phase_clients]
             print("Phase I mean client test accuracy:", np.mean(phase_acc))
-            global_state = copy.deepcopy(Net(input_shape).to(device).state_dict())
+            global_state = copy.deepcopy(
+                build_model(dataset_name, input_shape).to(device).state_dict()
+            )
             weights = np.asarray([len(s) for s in private_sets], dtype=np.float32)
             weights = (weights / weights.sum()).tolist()
-            for mode in ("c2s_only", "s2c_only", "bidirectional"):
+            for mode in ("c2s_only", "bidirectional"):
                 rows = run_mode(
                     mode, phase_states, global_state, private_sets, ref_dataset, test_loader,
-                    input_shape, weights, seed, device, args.alpha, rounds, distill_epochs
+                    dataset_name, input_shape, weights, seed, device, args.alpha, rounds,
+                    distill_epochs
                 )
                 frame = pd.DataFrame(
-                    [[dataset_name, "net"] + row for row in rows], columns=header
+                    [[dataset_name, "convnidd" if dataset_name == "cifar10" else "net"] + row
+                     for row in rows],
+                    columns=header,
                 )
                 frame[["server_acc", "client_mean_acc", "client_std_acc"]] = frame[
                     ["server_acc", "client_mean_acc", "client_std_acc"]
