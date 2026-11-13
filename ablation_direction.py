@@ -61,6 +61,11 @@ def main():
     parser.add_argument("--data-root", default="./data")
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--quick", action="store_true")
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="preserve existing results and skip completed dataset/seed combinations",
+    )
     args = parser.parse_args()
     rounds, distill_epochs, phase_max = args.rounds, DISTILL_EPOCHS, PHASE_MAX_EPOCHS
     seeds = args.seeds
@@ -68,7 +73,18 @@ def main():
         seeds, rounds, distill_epochs, phase_max = [seeds[0]], 2, 1, 2
     os.makedirs(args.out, exist_ok=True)
     per_round_path = os.path.join(args.out, "results_per_round.csv")
-    if os.path.exists(per_round_path):
+    completed = set()
+    if args.resume and os.path.exists(per_round_path):
+        existing = pd.read_csv(per_round_path)
+        expected_rounds = set(range(rounds + 1))
+        completed = {
+            (dataset, seed, mode)
+            for (dataset, seed, mode), group in existing.groupby(
+                ["dataset", "seed", "mode"]
+            )
+            if set(group["round"]) >= expected_rounds
+        }
+    elif os.path.exists(per_round_path):
         os.remove(per_round_path)
     if args.device == "cuda" and not torch.cuda.is_available():
         parser.error("--device cuda was requested, but CUDA is not available")
@@ -82,6 +98,10 @@ def main():
 
     for dataset_name in args.datasets:
         for seed in seeds:
+            if all((dataset_name, seed, mode) in completed
+                   for mode in ("c2s_only", "bidirectional")):
+                print(dataset_name, seed, "already complete; skipping")
+                continue
             seed_everything(seed)
             _, test, ref_dataset, private_sets, input_shape = get_data(
                 dataset_name, seed, root=args.data_root
@@ -104,9 +124,11 @@ def main():
             global_state = copy.deepcopy(
                 build_model(dataset_name, input_shape).to(device).state_dict()
             )
-            weights = np.asarray([len(s) for s in private_sets], dtype=np.float32)
-            weights = (weights / weights.sum()).tolist()
+            weights = (np.ones(len(private_sets), dtype=np.float32) / len(private_sets)).tolist()
             for mode in ("c2s_only", "bidirectional"):
+                if (dataset_name, seed, mode) in completed:
+                    print(dataset_name, seed, mode, "already complete; skipping")
+                    continue
                 rows = run_mode(
                     mode, phase_states, global_state, private_sets, ref_dataset, test_loader,
                     dataset_name, input_shape, weights, seed, device, args.alpha, rounds,

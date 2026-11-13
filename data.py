@@ -48,6 +48,7 @@ def get_data(name, seed, root="./data"):
         if min(map(len, client_indices)) >= 10:
             break
     ref_x = torch.stack([train[int(i)][0] for i in ref_indices])
-    ref_dataset = TensorDataset(ref_x, torch.zeros(len(ref_x), dtype=torch.long))
+    ref_y = torch.tensor([int(targets[i]) for i in ref_indices], dtype=torch.long)
+    ref_dataset = TensorDataset(ref_x, ref_y)
     private_sets = [Subset(train, indices.tolist()) for indices in client_indices]
     return train, test, ref_dataset, private_sets, shape
